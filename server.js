@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { restaurantInfo, formatter } from './constants.js';
 
 dotenv.config();
 
@@ -9,13 +10,18 @@ app.use(cors());
 
 const sessionConfig = {
   session: {
-    type: 'realtime',
-    model: 'gpt-realtime',
-    instructions: 'You are a helpful AI assistant. Speak at a faster pace with concise responses.',
+    type: "realtime",
+    model: "gpt-realtime",
+    instructions: `
+You are a voice order-taking AI agent for Chunky Chook (Chicken & Chips) in Auckland.
+Your job is to take accurate pickup orders quickly, confirm details, and avoid mistakes.
+
+${restaurantInfo}
+
+${formatter}
+`.trim(),
     audio: {
-      output: {
-        voice: 'alloy',
-      },
+      output: { voice: "shimmer" },
     },
   },
 };

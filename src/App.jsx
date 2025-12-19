@@ -6,6 +6,7 @@ function App() {
   const [transcript, setTranscript] = useState([])
   const [error, setError] = useState('')
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
+  const [orderInfo, setOrderInfo] = useState({ items: '', name: '', phone: '' })
 
   const peerConnectionRef = useRef(null)
   const dataChannelRef = useRef(null)
@@ -159,9 +160,28 @@ function App() {
     setConnectionStatus('disconnected')
   }
 
-  // Add message to transcript
+  // Add message to transcript & extract order info
   const addTranscript = (role, text) => {
     setTranscript(prev => [...prev, { role, text, timestamp: new Date().toLocaleTimeString() }])
+    if (role === 'user' || role === 'assistant' || role === 'AI') {
+      // 简单关键词提取（可根据实际AI回复格式优化）
+      let items = orderInfo.items
+      let name = orderInfo.name
+      let phone = orderInfo.phone
+      // 菜品
+      const itemMatch = text.match(/(点了|选择了|菜品|订单|order|items?[:：]?)([\w\W]{2,40}?)(?=，|。|,|\n|$)/)
+      if (itemMatch && itemMatch[2]) items = itemMatch[2].trim()
+      // 姓名
+      const nameMatch = text.match(/(姓名|name|order for|顾客名|名字)[:：]?([\w\u4e00-\u9fa5]{2,20})/i)
+      if (nameMatch && nameMatch[2]) name = nameMatch[2].trim()
+      // 电话
+      const phoneMatch = text.match(/(电话|phone|number|手机号|联系方式)[:：]?([0-9\-\+]{6,20})/i)
+      if (phoneMatch && phoneMatch[2]) phone = phoneMatch[2].trim()
+      // 直接手机号
+      const phoneDirect = text.match(/([0-9\-\+]{8,20})/)
+      if (!phone && phoneDirect) phone = phoneDirect[1]
+      setOrderInfo({ items, name, phone })
+    }
   }
 
   // Cleanup on unmount
@@ -210,6 +230,13 @@ function App() {
 
             <div className="button-group">
               <button onClick={disconnect}>Disconnect</button>
+            </div>
+
+            <div className="order-info" style={{margin:'1rem 0',padding:'1rem',border:'1px solid #eee',borderRadius:'8px'}}>
+              <h4>已收集的点单信息</h4>
+              <div><strong>菜品：</strong>{orderInfo.items || <span style={{color:'#888'}}>未填写</span>}</div>
+              <div><strong>姓名：</strong>{orderInfo.name || <span style={{color:'#888'}}>未填写</span>}</div>
+              <div><strong>电话：</strong>{orderInfo.phone || <span style={{color:'#888'}}>未填写</span>}</div>
             </div>
 
             <div className="transcript">
