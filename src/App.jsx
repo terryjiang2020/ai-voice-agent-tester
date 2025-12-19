@@ -4,21 +4,26 @@ import './App.css'
 function App() {
   const [isConnected, setIsConnected] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
-  const [apiKey, setApiKey] = useState('')
   const [transcript, setTranscript] = useState([])
   const [error, setError] = useState('')
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
+  
+  const apiKey = import.meta.env.VITE_OPENAI_API_KEY
 
   const wsRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const audioContextRef = useRef(null)
   const processorRef = useRef(null)
   const playbackAudioContextRef = useRef(null)
+  const recordingStartTimeRef = useRef(null)
+  const audioChunksSentRef = useRef(false)
 
   // Connect to OpenAI Realtime API
   const connect = async () => {
     if (!apiKey) {
-      setError('Please enter your OpenAI API key')
+      setError('ERROR: VITE_OPENAI_API_KEY not found in .env file. Please add your OpenAI API key to .env')
+      console.error('No API key found in environment variable VITE_OPENAI_API_KEY')
+      setConnectionStatus('error')
       return
     }
 
@@ -27,6 +32,8 @@ function App() {
       setError('')
 
       const url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
+      console.log('Attempting to connect with API key:', apiKey.substring(0, 10) + '...')
+      
       const ws = new WebSocket(url, [
         'realtime',
         `openai-insecure-api-key.${apiKey}`,
@@ -111,7 +118,8 @@ function App() {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error)
-        setError('Connection error. Please check your API key and try again.')
+        console.error('Connection failed. API key may be invalid or expired.')
+        setError('Connection error. API key may be invalid or expired. Please enter a valid API key.')
         setConnectionStatus('disconnected')
       }
 
@@ -152,47 +160,61 @@ function App() {
       setError('')
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
-          channelCount: 1,
-          sampleRate: 24000,
           echoCancellation: true,
-          noiseSuppression: true
+          noiseSuppression: true,
+          autoGainControl: true
         } 
       })
       
       mediaStreamRef.current = stream
       const audioContext = new AudioContext({ sampleRate: 24000 })
+      await audioContext.resume()
       audioContextRef.current = audioContext
 
       const source = audioContext.createMediaStreamSource(stream)
       const processor = audioContext.createScriptProcessor(4096, 1, 1)
       
+      let audioChunkCount = 0
+      
       processor.onaudioprocess = (e) => {
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           const inputData = e.inputBuffer.getChannelData(0)
-          
+
           // Convert Float32Array to Int16Array (PCM16)
           const pcm16 = new Int16Array(inputData.length)
           for (let i = 0; i < inputData.length; i++) {
             const s = Math.max(-1, Math.min(1, inputData[i]))
             pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
           }
-          
-          // Convert to base64
+
+          // Convert to base64 and send
           const base64 = arrayBufferToBase64(pcm16.buffer)
-          
-          // Send audio data to the API
           wsRef.current.send(JSON.stringify({
             type: 'input_audio_buffer.append',
             audio: base64
           }))
+
+          // Mark that we've sent at least one chunk
+          audioChunksSentRef.current = true
+          audioChunkCount++
+          if (audioChunkCount % 10 === 0) {
+            console.log('Audio chunks sent:', audioChunkCount)
+          }
         }
       }
 
       source.connect(processor)
-      processor.connect(audioContext.destination)
+      // Keep processor alive without feedback by routing through zero-gain node
+      const silentGain = audioContext.createGain()
+      silentGain.gain.value = 0
+      processor.connect(silentGain)
+      silentGain.connect(audioContext.destination)
       processorRef.current = processor
+      recordingStartTimeRef.current = Date.now()
+      audioChunksSentRef.current = false
 
       setIsRecording(true)
+      console.log('Recording started')
     } catch (err) {
       console.error('Error accessing microphone:', err)
       setError('Failed to access microphone. Please grant permission.')
@@ -217,19 +239,41 @@ function App() {
     }
 
     setIsRecording(false)
+    console.log('Recording stopped, audio chunks sent:', audioChunksSentRef.current)
 
-    // Commit the audio buffer and request a response
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'input_audio_buffer.commit'
-      }))
+    // Calculate how long recording took
+    const recordingDuration = recordingStartTimeRef.current ? Date.now() - recordingStartTimeRef.current : 0
+    recordingStartTimeRef.current = null
 
-      wsRef.current.send(JSON.stringify({
-        type: 'response.create'
-      }))
+    // Commit the audio buffer and request a response with a delay to ensure all audio is flushed
+    // Use longer delay (500ms) to account for buffering
+    const commitDelay = Math.max(500, recordingDuration + 100)
+    
+    // Only commit if audio chunks were actually sent to the API
+    if (audioChunksSentRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log(`Committing audio buffer in ${commitDelay}ms`)
+      setTimeout(() => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          console.log('Sending input_audio_buffer.commit')
+          wsRef.current.send(JSON.stringify({
+            type: 'input_audio_buffer.commit'
+          }))
+
+          console.log('Sending response.create')
+          wsRef.current.send(JSON.stringify({
+            type: 'response.create'
+          }))
+        } else {
+          console.log('WebSocket not ready when trying to commit')
+        }
+      }, commitDelay)
+    } else {
+      console.log('Not committing - audioChunksSent:', audioChunksSentRef.current, 'ws ready:', wsRef.current?.readyState === WebSocket.OPEN)
     }
+    
+    // Reset the audio chunks flag for next recording
+    audioChunksSentRef.current = false
   }
-
   // Helper function to convert ArrayBuffer to base64
   const arrayBufferToBase64 = (buffer) => {
     const bytes = new Uint8Array(buffer)
@@ -291,23 +335,36 @@ function App() {
     }
   }, [])
 
+  // Auto-connect if API key is provided via environment variable
+  useEffect(() => {
+    const attemptAutoConnect = async () => {
+      if (import.meta.env.VITE_OPENAI_API_KEY) {
+        console.log('Auto-connecting with API key from environment')
+        await connect()
+      } else {
+        setError('ERROR: VITE_OPENAI_API_KEY not found in .env file. Please add your OpenAI API key to .env')
+        setConnectionStatus('error')
+        console.error('VITE_OPENAI_API_KEY not found in .env')
+      }
+    }
+    attemptAutoConnect()
+  }, [])
+
   return (
     <div className="App">
       <h1>🎙️ AI Voice Agent Tester</h1>
       <p>Connect to ChatGPT Realtime API and interact with voice</p>
 
       <div className="voice-panel">
+        {error && (
+          <div className="error-message">
+            {error}
+          </div>
+        )}
+        
         {!isConnected && (
-          <div>
-            <h3>Setup</h3>
-            <input
-              type="password"
-              className="api-key-input"
-              placeholder="Enter your OpenAI API Key"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-            <button onClick={connect}>Connect to API</button>
+          <div style={{ textAlign: 'center', padding: '20px' }}>
+            <p>Connecting to API...</p>
           </div>
         )}
 
@@ -350,11 +407,7 @@ function App() {
           </>
         )}
 
-        {error && (
-          <div className="error-message">
-            ❌ {error}
-          </div>
-        )}
+
       </div>
 
       <div style={{ marginTop: '2rem', fontSize: '0.9em', opacity: 0.7 }}>
