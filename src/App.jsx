@@ -3,134 +3,135 @@ import './App.css'
 
 function App() {
   const [isConnected, setIsConnected] = useState(false)
-  const [isRecording, setIsRecording] = useState(false)
   const [transcript, setTranscript] = useState([])
   const [error, setError] = useState('')
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
-  
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY
 
-  const wsRef = useRef(null)
-  const mediaStreamRef = useRef(null)
-  const audioContextRef = useRef(null)
-  const processorRef = useRef(null)
-  const playbackAudioContextRef = useRef(null)
-  const recordingStartTimeRef = useRef(null)
-  const audioChunksSentRef = useRef(false)
+  const peerConnectionRef = useRef(null)
+  const dataChannelRef = useRef(null)
+  const audioElementRef = useRef(null)
 
-  // Connect to OpenAI Realtime API
+  // Connect to OpenAI Realtime API using WebRTC
   const connect = async () => {
-    if (!apiKey) {
-      setError('ERROR: VITE_OPENAI_API_KEY not found in .env file. Please add your OpenAI API key to .env')
-      console.error('No API key found in environment variable VITE_OPENAI_API_KEY')
-      setConnectionStatus('error')
-      return
-    }
-
     try {
       setConnectionStatus('connecting')
       setError('')
 
-      const url = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01'
-      console.log('Attempting to connect with API key:', apiKey.substring(0, 10) + '...')
-      
-      const ws = new WebSocket(url, [
-        'realtime',
-        `openai-insecure-api-key.${apiKey}`,
-        'openai-beta.realtime-v1'
-      ])
+      // Step 1: Get ephemeral token from our server
+      console.log('Fetching ephemeral token from server...')
+      const tokenResponse = await fetch('http://localhost:3000/token')
+      if (!tokenResponse.ok) {
+        throw new Error(`Failed to fetch ephemeral token: ${tokenResponse.statusText}`)
+      }
+      const data = await tokenResponse.json()
+      const EPHEMERAL_KEY = data.value
 
-      ws.onopen = () => {
-        console.log('Connected to OpenAI Realtime API')
-        setIsConnected(true)
-        setConnectionStatus('connected')
-        
-        // Send session update to configure the session
-        ws.send(JSON.stringify({
-          type: 'session.update',
-          session: {
-            modalities: ['text', 'audio'],
-            instructions: 'You are a helpful AI assistant. Respond to the user in a conversational manner.',
-            voice: 'alloy',
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            input_audio_transcription: {
-              model: 'whisper-1'
-            },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500
-            }
-          }
-        }))
+      console.log('Ephemeral token received, setting up WebRTC...')
+
+      // Step 2: Create a peer connection
+      const pc = new RTCPeerConnection()
+      peerConnectionRef.current = pc
+
+      // Step 3: Set up to play remote audio from the model
+      if (!audioElementRef.current) {
+        audioElementRef.current = document.createElement('audio')
+        audioElementRef.current.autoplay = true
+        audioElementRef.current.volume = 1.0
+      }
+      pc.ontrack = (e) => {
+        console.log('Received audio track from server')
+        audioElementRef.current.srcObject = e.streams[0]
+        audioElementRef.current.play().catch(err => console.log('Audio play error:', err))
       }
 
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        console.log('Received:', data.type, data)
+      // Step 4: Add local audio track for microphone input
+      console.log('Requesting microphone access...')
+      const ms = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 24000,
+          channelCount: 1
+        },
+      })
+      pc.addTrack(ms.getTracks()[0])
 
-        switch (data.type) {
+      // Step 5: Set up data channel for sending and receiving events
+      const dc = pc.createDataChannel('oai-events')
+      dataChannelRef.current = dc
+
+      dc.onopen = () => {
+        console.log('Data channel opened - connected!')
+        setIsConnected(true)
+        setConnectionStatus('connected')
+      }
+
+      dc.onclose = () => {
+        console.log('Data channel closed')
+        setIsConnected(false)
+        setConnectionStatus('disconnected')
+      }
+
+      dc.onerror = (err) => {
+        console.error('Data channel error:', err)
+        setError(`Data channel error: ${err}`)
+      }
+
+      // Listen for server events
+      dc.addEventListener('message', (e) => {
+        const event = JSON.parse(e.data)
+        console.log('Received event:', event.type)
+
+        switch (event.type) {
           case 'conversation.item.created':
-            if (data.item.type === 'message') {
-              const role = data.item.role
-              const content = data.item.content?.[0]
-              if (content) {
-                if (content.type === 'text') {
-                  addTranscript(role, content.text)
-                } else if (content.type === 'audio') {
-                  console.log('Audio response received')
-                }
+            if (event.item?.type === 'message') {
+              const role = event.item.role
+              const content = event.item.content?.[0]
+              if (content && content.type === 'text') {
+                addTranscript(role, content.text)
               }
             }
             break
 
-          case 'response.audio.delta':
-            // Handle audio delta - this is the actual audio response
-            if (data.delta) {
-              playAudioDelta(data.delta)
-            }
-            break
-
           case 'conversation.item.input_audio_transcription.completed':
-            // User's speech was transcribed
-            if (data.transcript) {
-              addTranscript('user', data.transcript)
+            if (event.transcript) {
+              addTranscript('user', event.transcript)
             }
-            break
-
-          case 'response.text.delta':
-            // Text response delta
-            console.log('Text delta:', data.delta)
-            break
-
-          case 'response.done':
-            console.log('Response completed')
             break
 
           case 'error':
-            console.error('API Error:', data.error)
-            setError(`API Error: ${data.error.message}`)
+            console.error('API Error:', event.error)
+            setError(`API Error: ${event.error.message}`)
             break
         }
+      })
+
+      // Step 6: Start the session using the Session Description Protocol (SDP)
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+
+      console.log('Connecting to OpenAI Realtime API...')
+      const sdpResponse = await fetch('https://api.openai.com/v1/realtime/calls', {
+        method: 'POST',
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${EPHEMERAL_KEY}`,
+          'Content-Type': 'application/sdp',
+        },
+      })
+
+      if (!sdpResponse.ok) {
+        throw new Error(`SDP exchange failed: ${sdpResponse.statusText}`)
       }
 
-      ws.onerror = (error) => {
-        console.error('WebSocket error:', error)
-        console.error('Connection failed. API key may be invalid or expired.')
-        setError('Connection error. API key may be invalid or expired. Please enter a valid API key.')
-        setConnectionStatus('disconnected')
+      const answer = {
+        type: 'answer',
+        sdp: await sdpResponse.text(),
       }
+      await pc.setRemoteDescription(answer)
 
-      ws.onclose = () => {
-        console.log('Disconnected from OpenAI Realtime API')
-        setIsConnected(false)
-        setConnectionStatus('disconnected')
-        stopRecording()
-      }
-
-      wsRef.current = ws
+      console.log('WebRTC connection established successfully')
     } catch (err) {
       console.error('Connection error:', err)
       setError(`Failed to connect: ${err.message}`)
@@ -140,184 +141,22 @@ function App() {
 
   // Disconnect from the API
   const disconnect = () => {
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
+    if (dataChannelRef.current) {
+      dataChannelRef.current.close()
+      dataChannelRef.current = null
     }
-    stopRecording()
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close()
+      peerConnectionRef.current = null
+    }
+
+    if (audioElementRef.current) {
+      audioElementRef.current.srcObject = null
+    }
+
     setIsConnected(false)
     setConnectionStatus('disconnected')
-  }
-
-  // Start recording audio
-  const startRecording = async () => {
-    if (!isConnected) {
-      setError('Please connect to the API first')
-      return
-    }
-
-    try {
-      setError('')
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        } 
-      })
-      
-      mediaStreamRef.current = stream
-      const audioContext = new AudioContext({ sampleRate: 24000 })
-      await audioContext.resume()
-      audioContextRef.current = audioContext
-
-      const source = audioContext.createMediaStreamSource(stream)
-      const processor = audioContext.createScriptProcessor(4096, 1, 1)
-      
-      let audioChunkCount = 0
-      
-      processor.onaudioprocess = (e) => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          const inputData = e.inputBuffer.getChannelData(0)
-
-          // Convert Float32Array to Int16Array (PCM16)
-          const pcm16 = new Int16Array(inputData.length)
-          for (let i = 0; i < inputData.length; i++) {
-            const s = Math.max(-1, Math.min(1, inputData[i]))
-            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
-          }
-
-          // Convert to base64 and send
-          const base64 = arrayBufferToBase64(pcm16.buffer)
-          wsRef.current.send(JSON.stringify({
-            type: 'input_audio_buffer.append',
-            audio: base64
-          }))
-
-          // Mark that we've sent at least one chunk
-          audioChunksSentRef.current = true
-          audioChunkCount++
-          if (audioChunkCount % 10 === 0) {
-            console.log('Audio chunks sent:', audioChunkCount)
-          }
-        }
-      }
-
-      source.connect(processor)
-      // Keep processor alive without feedback by routing through zero-gain node
-      const silentGain = audioContext.createGain()
-      silentGain.gain.value = 0
-      processor.connect(silentGain)
-      silentGain.connect(audioContext.destination)
-      processorRef.current = processor
-      recordingStartTimeRef.current = Date.now()
-      audioChunksSentRef.current = false
-
-      setIsRecording(true)
-      console.log('Recording started')
-    } catch (err) {
-      console.error('Error accessing microphone:', err)
-      setError('Failed to access microphone. Please grant permission.')
-    }
-  }
-
-  // Stop recording audio
-  const stopRecording = () => {
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach(track => track.stop())
-      mediaStreamRef.current = null
-    }
-
-    if (processorRef.current) {
-      processorRef.current.disconnect()
-      processorRef.current = null
-    }
-
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
-
-    setIsRecording(false)
-    console.log('Recording stopped, audio chunks sent:', audioChunksSentRef.current)
-
-    // Calculate how long recording took
-    const recordingDuration = recordingStartTimeRef.current ? Date.now() - recordingStartTimeRef.current : 0
-    recordingStartTimeRef.current = null
-
-    // Commit the audio buffer and request a response with a delay to ensure all audio is flushed
-    // Use longer delay (500ms) to account for buffering
-    const commitDelay = Math.max(500, recordingDuration + 100)
-    
-    // Only commit if audio chunks were actually sent to the API
-    if (audioChunksSentRef.current && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      console.log(`Committing audio buffer in ${commitDelay}ms`)
-      setTimeout(() => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          console.log('Sending input_audio_buffer.commit')
-          wsRef.current.send(JSON.stringify({
-            type: 'input_audio_buffer.commit'
-          }))
-
-          console.log('Sending response.create')
-          wsRef.current.send(JSON.stringify({
-            type: 'response.create'
-          }))
-        } else {
-          console.log('WebSocket not ready when trying to commit')
-        }
-      }, commitDelay)
-    } else {
-      console.log('Not committing - audioChunksSent:', audioChunksSentRef.current, 'ws ready:', wsRef.current?.readyState === WebSocket.OPEN)
-    }
-    
-    // Reset the audio chunks flag for next recording
-    audioChunksSentRef.current = false
-  }
-  // Helper function to convert ArrayBuffer to base64
-  const arrayBufferToBase64 = (buffer) => {
-    const bytes = new Uint8Array(buffer)
-    let binary = ''
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i])
-    }
-    return btoa(binary)
-  }
-
-  // Helper function to play audio delta
-  const playAudioDelta = (base64Audio) => {
-    try {
-      // Decode base64 to ArrayBuffer
-      const binaryString = atob(base64Audio)
-      const bytes = new Uint8Array(binaryString.length)
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i)
-      }
-
-      // Reuse or create AudioContext for playback
-      if (!playbackAudioContextRef.current || playbackAudioContextRef.current.state === 'closed') {
-        playbackAudioContextRef.current = new AudioContext({ sampleRate: 24000 })
-      }
-      const audioContext = playbackAudioContextRef.current
-      
-      const audioBuffer = audioContext.createBuffer(1, bytes.length / 2, 24000)
-      const channelData = audioBuffer.getChannelData(0)
-
-      // Convert Int16 to Float32 (little-endian byte order)
-      for (let i = 0; i < channelData.length; i++) {
-        const int16 = bytes[i * 2] | (bytes[i * 2 + 1] << 8)
-        // Convert to signed int16 if needed
-        const signedInt16 = int16 > 0x7FFF ? int16 - 0x10000 : int16
-        channelData[i] = signedInt16 / (signedInt16 < 0 ? 0x8000 : 0x7FFF)
-      }
-
-      const source = audioContext.createBufferSource()
-      source.buffer = audioBuffer
-      source.connect(audioContext.destination)
-      source.start()
-    } catch (err) {
-      console.error('Error playing audio:', err)
-    }
   }
 
   // Add message to transcript
@@ -329,23 +168,14 @@ function App() {
   useEffect(() => {
     return () => {
       disconnect()
-      if (playbackAudioContextRef.current) {
-        playbackAudioContextRef.current.close()
-      }
     }
   }, [])
 
-  // Auto-connect if API key is provided via environment variable
+  // Auto-connect on mount
   useEffect(() => {
     const attemptAutoConnect = async () => {
-      if (import.meta.env.VITE_OPENAI_API_KEY) {
-        console.log('Auto-connecting with API key from environment')
-        await connect()
-      } else {
-        setError('ERROR: VITE_OPENAI_API_KEY not found in .env file. Please add your OpenAI API key to .env')
-        setConnectionStatus('error')
-        console.error('VITE_OPENAI_API_KEY not found in .env')
-      }
+      console.log('Auto-connecting to Realtime API via WebRTC')
+      await connect()
     }
     attemptAutoConnect()
   }, [])
@@ -353,7 +183,7 @@ function App() {
   return (
     <div className="App">
       <h1>🎙️ AI Voice Agent Tester</h1>
-      <p>Connect to ChatGPT Realtime API and interact with voice</p>
+      <p>Connect to ChatGPT Realtime API via WebRTC</p>
 
       <div className="voice-panel">
         {error && (
@@ -375,13 +205,7 @@ function App() {
             </div>
 
             <div className="controls">
-              <button 
-                className={`mic-button ${isRecording ? 'recording' : ''}`}
-                onClick={isRecording ? stopRecording : startRecording}
-                title={isRecording ? 'Stop Recording' : 'Start Recording'}
-              >
-                {isRecording ? '⏹️' : '🎤'}
-              </button>
+              <div>🎤 Microphone streaming is active via WebRTC.</div>
             </div>
 
             <div className="button-group">
@@ -392,7 +216,7 @@ function App() {
               <h4>Conversation</h4>
               {transcript.length === 0 && (
                 <p style={{ color: '#888', textAlign: 'center' }}>
-                  Click the microphone to start talking...
+                  Start talking...
                 </p>
               )}
               {transcript.map((item, index) => (
@@ -406,18 +230,13 @@ function App() {
             </div>
           </>
         )}
-
-
       </div>
 
       <div style={{ marginTop: '2rem', fontSize: '0.9em', opacity: 0.7 }}>
         <p>
-          To use this app, you need an OpenAI API key with access to the Realtime API.
+          Using WebRTC connection with ephemeral keys for secure browser-based voice interaction.
           <br />
-          Get your API key from{' '}
-          <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">
-            OpenAI Platform
-          </a>
+          Server must be running on port 3000 to mint ephemeral tokens.
         </p>
       </div>
     </div>
