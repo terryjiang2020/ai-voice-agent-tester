@@ -13,6 +13,7 @@ function App() {
   const mediaStreamRef = useRef(null)
   const audioContextRef = useRef(null)
   const processorRef = useRef(null)
+  const playbackAudioContextRef = useRef(null)
 
   // Connect to OpenAI Realtime API
   const connect = async () => {
@@ -249,15 +250,21 @@ function App() {
         bytes[i] = binaryString.charCodeAt(i)
       }
 
-      // Convert PCM16 to AudioBuffer and play
-      const audioContext = new AudioContext({ sampleRate: 24000 })
+      // Reuse or create AudioContext for playback
+      if (!playbackAudioContextRef.current || playbackAudioContextRef.current.state === 'closed') {
+        playbackAudioContextRef.current = new AudioContext({ sampleRate: 24000 })
+      }
+      const audioContext = playbackAudioContextRef.current
+      
       const audioBuffer = audioContext.createBuffer(1, bytes.length / 2, 24000)
       const channelData = audioBuffer.getChannelData(0)
 
-      // Convert Int16 to Float32
+      // Convert Int16 to Float32 (little-endian byte order)
       for (let i = 0; i < channelData.length; i++) {
-        const int16 = (bytes[i * 2 + 1] << 8) | bytes[i * 2]
-        channelData[i] = int16 / (int16 < 0 ? 0x8000 : 0x7FFF)
+        const int16 = bytes[i * 2] | (bytes[i * 2 + 1] << 8)
+        // Convert to signed int16 if needed
+        const signedInt16 = int16 > 0x7FFF ? int16 - 0x10000 : int16
+        channelData[i] = signedInt16 / (signedInt16 < 0 ? 0x8000 : 0x7FFF)
       }
 
       const source = audioContext.createBufferSource()
@@ -278,6 +285,9 @@ function App() {
   useEffect(() => {
     return () => {
       disconnect()
+      if (playbackAudioContextRef.current) {
+        playbackAudioContextRef.current.close()
+      }
     }
   }, [])
 
