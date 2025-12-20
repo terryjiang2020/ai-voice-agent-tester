@@ -28,3 +28,33 @@ dist-ssr
 .env.local
 .env.production.local
 .env.development.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+backend/logs/
+
+# Models and cache (large files)
+backend/pretrained_models/
+backend/CosyVoice/
+*.pth
+*.ckpt
+*.safetensors
+.cache/
+.modelscope/
+
+# Docker volumes
+.docker/
+
+# Keep .temp for planning, but ignore logs
+# .temp/
+
+.github
+.temp

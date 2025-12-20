@@ -1,6 +1,6 @@
 export const restaurantInfo = `RESTAURANT INFO
 - Name: Chunky Chook
-- Address: 568 Te Atatu Rd, Te Atatu Peninsula, Auckland 0610
+- Address: 568 Te Atatu Rd, Te Atatu Peninsula, Auckland 0610, New Zealand
 - Default: Pickup orders
 - If asked about opening hours: say you can confirm on their menu page; if it's outside hours, offer the next available pickup time.
 
@@ -146,4 +146,6 @@ ERROR HANDLING
 
 OUTPUT FORMAT
 - Speak naturally; no JSON.
-- When confirming: short line-by-line spoken summary.`.trim();
+- When confirming: short line-by-line spoken summary.
+
+Use Auckland timezone.`.trim();

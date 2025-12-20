@@ -26,28 +26,54 @@ ${formatter}
   },
 };
 
-// Endpoint to generate ephemeral API keys for WebRTC
+// Endpoint to generate ephemeral API keys for WebRTC (OpenAI)
 app.get('/token', async (req, res) => {
+  const model = req.query.model || 'openai';
+  
   try {
-    const response = await fetch(
-      'https://api.openai.com/v1/realtime/client_secrets',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.VITE_OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(sessionConfig),
+    if (model === 'grok') {
+      // Grok uses direct WebSocket, return API key info
+      const response = await fetch(
+        'https://api.x.ai/v1/realtime/client_secrets',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.VITE_XAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ expires_after: { seconds: 300 } }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`xAI API error: ${response.status} - ${errorText}`);
       }
-    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      const data = await response.json();
+      res.json(data);
+    } else {
+      // OpenAI WebRTC
+      const response = await fetch(
+        'https://api.openai.com/v1/realtime/client_secrets',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.VITE_OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(sessionConfig),
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      res.json(data);
     }
-
-    const data = await response.json();
-    res.json(data);
   } catch (error) {
     console.error('Token generation error:', error);
     res.status(500).json({ error: 'Failed to generate token', details: error.message });

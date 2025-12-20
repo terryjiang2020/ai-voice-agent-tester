@@ -1,0 +1,61 @@
+# Web 服务
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+websockets==12.0
+python-multipart==0.0.6
+
+# ASR - Fun-ASR (阿里开源)
+# 使用 FunASR 框架 + SenseVoice 模型
+funasr==1.0.23
+modelscope==1.11.0
+
+# TTS - CosyVoice (阿里开源)
+# 从 GitHub 安装最新版本
+# git+https://github.com/FunAudioLLM/CosyVoice.git
+# 或先手动克隆后本地安装: pip install -e CosyVoice/
+
+# 音频处理
+numpy==1.24.3
+scipy==1.11.4
+soundfile==0.12.1
+librosa==0.10.1
+pydub==0.25.1
+
+# 深度学习框架
+torch==2.1.0
+torchaudio==2.1.0
+# 如果有 GPU (CUDA 11.8):
+# torch==2.1.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+
+# LLM 客户端 (支持 OpenAI API / Ollama)
+openai==1.10.0
+anthropic==0.8.0
+# Ollama 使用 OpenAI SDK 兼容接口，无需额外依赖
+
+# 工具
+python-dotenv==1.0.0
+loguru==0.7.2
+pydantic==2.5.3
+
+# ============================================
+# 📦 安装说明
+# ============================================
+#
+# 1. 基础安装:
+#    pip install -r requirements.txt
+#
+# 2. CosyVoice 手动安装 (推荐):
+#    cd backend
+#    git clone https://github.com/FunAudioLLM/CosyVoice.git
+#    cd CosyVoice
+#    pip install -e .
+#
+# 3. GPU 版本 PyTorch:
+#    pip install torch==2.1.0+cu118 torchaudio==2.1.0+cu118 \
+#      -f https://download.pytorch.org/whl/torch_stable.html
+#
+# 4. Apple Silicon Mac:
+#    # PyTorch 自动支持 MPS
+#    pip install torch torchaudio
+#
+# ============================================

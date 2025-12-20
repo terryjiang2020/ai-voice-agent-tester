@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # Python 后端服务 - 运行 ASR/TTS 模型
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: voice-agent-backend
+    ports:
+      - "8000:8000"  # WebSocket 服务端口
+    volumes:
+      - ./backend:/app
+      - model-cache:/root/.cache  # 缓存下载的模型文件
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_DIR=/root/.cache/models
+      - ASR_MODEL=iic/SenseVoiceNano  # Fun-ASR Nano 模型
+      - TTS_MODEL=CosyVoice-300M  # CosyVoice 轻量模型
+      - USE_CPU=0  # EC2 有 GPU，启用 GPU 加速
+      
+      # LLM 配置 - 默认使用本地 Ollama
+      - USE_LOCAL_LLM=1
+      - OLLAMA_BASE_URL=http://localhost:11434/v1
+      - OLLAMA_MODEL=qwen3:0.6b
+      
+      # 远程 LLM 配置 (可选，设置 USE_LOCAL_LLM=0 启用)
+      - LLM_API_KEY=${OPENAI_API_KEY}
+      - LLM_API_BASE=${LLM_API_BASE:-https://api.openai.com/v1}
+    # macOS Docker Desktop 不支持容器使用 GPU；此服务以 CPU 模式运行
+
+  # Node.js 前端开发服务器
+  frontend:
+    image: node:20-alpine
+    container_name: voice-agent-frontend
+    working_dir: /app
+    ports:
+      - "5173:5173"  # Vite 开发服务器
+      - "3000:3000"  # Express token 服务器
+    volumes:
+      - .:/app
+      - /app/node_modules  # 使用容器内的 node_modules
+    environment:
+      - VITE_BACKEND_WS=ws://backend:8000/ws
+      - VITE_OPENAI_API_KEY=${VITE_OPENAI_API_KEY}
+      - VITE_XAI_API_KEY=${VITE_XAI_API_KEY}
+    command: sh -c "npm install && npm run dev:all"
+    depends_on:
+      - backend
+
+volumes:
+  model-cache:  # 持久化模型文件，避免重复下载

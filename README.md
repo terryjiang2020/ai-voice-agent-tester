@@ -1,96 +1,328 @@
 # AI Voice Agent Tester
 
-A React-based application for testing voice interactions with ChatGPT's Realtime API.
+A full-stack voice conversation system with local AI models (Fun-ASR + Ollama + CosyVoice) and remote API support (OpenAI/Grok).
 
-## Features
+## 🎯 Features
 
-- 🎤 **Voice Input**: Record your voice directly in the browser
-- 🤖 **Real-time AI Responses**: Connect to OpenAI's GPT-4 Realtime API
-- 🔊 **Audio Playback**: Hear AI responses in voice
-- 📝 **Conversation Transcript**: View the conversation history
-- 🔒 **Secure**: API key is stored locally and never sent to any third party
+- 🎤 **Voice Input**: Real-time speech recognition (Fun-ASR)
+- 🤖 **AI Conversation**: Local LLM (Ollama) or Remote API (OpenAI/Grok)
+- 🔊 **Voice Output**: Natural speech synthesis (CosyVoice)
+- 📝 **Streaming**: Full-duplex streaming conversation
+- 🖥️ **Flexible Deployment**: Docker, Local, or EC2 GPU
+- 🔒 **Privacy**: 100% local inference option (no data leaves your machine)
 
-## Prerequisites
+## 📦 Deployment Options
 
-- Node.js 18+ and npm
-- OpenAI API key with access to the Realtime API
-  - Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys)
-  - Ensure your account has access to the GPT-4 Realtime API (currently in beta)
+### 1. EC2 GPU (Recommended for Production)
+Full GPU acceleration on AWS EC2 with local models.
 
-## Installation
+📖 **[EC2 Setup Guide](./EC2_SETUP.md)** - Complete installation instructions
+📋 **[EC2 Quick Start](./EC2_QUICKSTART.md)** - Fast deployment for configured instances
 
-1. Clone the repository:
 ```bash
+# Quick start on EC2
 git clone https://github.com/terryjiang2020/ai-voice-agent-tester.git
 cd ai-voice-agent-tester
+./scripts/start-local.sh
 ```
 
-2. Install dependencies:
+**Requirements**: EC2 GPU instance (g4dn.xlarge+), CUDA 11.8+, 50GB+ storage
+
+### 2. Docker (Development/Testing)
+Containerized deployment with CPU or GPU support.
+
+📖 **[Docker Deployment Guide](./DEPLOYMENT.md)**
+
 ```bash
+# Start with Docker Compose
+docker-compose up --build
+```
+
+**Note**: macOS Docker Desktop does not support GPU access.
+
+### 3. Local Development
+Direct installation on your machine.
+**Note**: macOS Docker Desktop does not support GPU access.
+
+### 3. Local Development
+Direct installation on your machine.
+
+```bash
+# Prerequisites
+# - Python 3.10+
+# - Node.js 18+
+# - Ollama (optional, for local LLM)
+
+# Clone and install
+git clone https://github.com/terryjiang2020/ai-voice-agent-tester.git
+cd ai-voice-agent-tester
+
+# Install dependencies
+cd backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+cd ..
 npm install
-```
 
-3. (Optional) Create a `.env` file:
-```bash
+# Configure .env
 cp .env.example .env
-# Edit .env and add your OpenAI API key
+# Edit .env with your settings
+
+# Start services
+cd backend && python server.py &  # Backend
+npm run dev  # Frontend
 ```
 
-## Usage
+---
 
-1. Start the development server:
+## 🚀 Quick Start
+
+### Option A: Local Models (Privacy-First)
 ```bash
+# 1. Install Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+
+# 2. Pull model
+ollama pull qwen3:0.6b
+
+# 3. Configure .env
+USE_LOCAL_LLM=1
+OLLAMA_MODEL=qwen3:0.6b
+ASR_MODEL=iic/SenseVoiceNano
+
+# 4. Start
+./scripts/start-local.sh
+```
+
+### Option B: Remote API (Easier Setup)
+```bash
+# 1. Get API key from OpenAI or Grok
+
+# 2. Configure .env
+USE_LOCAL_LLM=0
+VITE_OPENAI_API_KEY=sk-your-key-here
+
+# 3. Start
 npm run dev
 ```
 
-2. Open your browser and navigate to `http://localhost:5173`
+---
 
-3. Enter your OpenAI API key in the input field (or set it in `.env`)
+## 🛠️ Configuration
 
-4. Click "Connect to API" to establish a connection
-
-5. Click the microphone button to start recording your voice
-
-6. Speak your message and click the stop button when done
-
-7. The AI will process your input and respond with voice and text
-
-## Building for Production
+### Environment Variables (.env)
 
 ```bash
-npm run build
+# === LLM Configuration ===
+USE_LOCAL_LLM=1                          # 1=Local Ollama, 0=Remote API
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_MODEL=qwen3:0.6b                  # or deepseek-r1:1.5b
+
+# === Model Configuration ===
+ASR_MODEL=iic/SenseVoiceNano             # Speech recognition
+TTS_MODEL=CosyVoice-300M                 # Speech synthesis
+USE_CPU=0                                # 0=GPU, 1=CPU
+
+# === Remote API (Optional) ===
+VITE_OPENAI_API_KEY=sk-xxx               # OpenAI API key
+VITE_XAI_API_KEY=xai-xxx                 # Grok API key
+
+# === Network ===
+VITE_BACKEND_WS=ws://localhost:8000/ws   # Backend WebSocket URL
 ```
 
-The built files will be in the `dist` directory.
+---
 
-## Preview Production Build
+## 🏗️ Architecture
 
+```
+┌─────────────┐
+│   Browser   │ Microphone → WebSocket
+└──────┬──────┘
+       │
+       ↓ Audio Stream (PCM)
+┌─────────────────────────────────────┐
+│      Backend (FastAPI)               │
+│  ┌─────────────────────────────┐   │
+│  │  Fun-ASR (Speech → Text)    │   │
+│  └──────────┬──────────────────┘   │
+│             ↓                        │
+│  ┌─────────────────────────────┐   │
+│  │  Ollama/OpenAI (LLM)        │   │
+│  └──────────┬──────────────────┘   │
+│             ↓                        │
+│  ┌─────────────────────────────┐   │
+│  │  CosyVoice (Text → Speech)  │   │
+│  └──────────┬──────────────────┘   │
+└─────────────┼───────────────────────┘
+              ↓ Audio Stream
+       ┌──────────────┐
+       │  Web Audio   │ Playback
+       └──────────────┘
+```
+
+---
+
+## 📚 Documentation
+
+- **[EC2 Setup Guide](./EC2_SETUP.md)** - Production deployment on AWS EC2 GPU
+- **[EC2 Quick Start](./EC2_QUICKSTART.md)** - Fast deployment reference
+- **[Docker Deployment](./DEPLOYMENT.md)** - Container deployment guide
+- **[Ollama Setup](./OLLAMA_SETUP.md)** - Local LLM configuration
+
+---
+
+## 🎯 Usage
+
+---
+
+## 🎯 Usage
+
+1. **Open the application** in your browser (default: `http://localhost:5173`)
+
+2. **Select model**:
+   - **OpenAI Realtime API** - Remote, requires API key
+   - **Grok Realtime API** - Remote, requires API key
+   - **Local Model** - Local ASR + Ollama + TTS
+
+3. **Connect** by entering API key (remote) or clicking Connect (local)
+
+4. **Click microphone** button to start recording
+
+5. **Speak naturally** - AI will respond in real-time with voice
+
+6. **View transcript** of the conversation
+
+---
+
+## 🔧 Technical Stack
+
+### Backend
+- **Framework**: FastAPI + WebSocket
+- **ASR**: Fun-ASR (SenseVoiceNano) - Real-time speech recognition
+- **LLM**: Ollama (qwen3:0.6b) or OpenAI API
+- **TTS**: CosyVoice-300M - Natural voice synthesis
+- **Streaming**: Async generators for low-latency
+
+### Frontend
+- **Framework**: React 18 + Vite
+- **Audio**: Web Audio API + MediaRecorder
+- **WebSocket**: Real-time bidirectional communication
+- **State**: React hooks
+
+---
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+#### Microphone Not Working
 ```bash
-npm run preview
+# Check browser permissions
+# Chrome: Settings → Privacy → Site Settings → Microphone
+# Allow microphone access for localhost
 ```
 
-## Technical Details
+#### Ollama Connection Failed
+```bash
+# Check Ollama is running
+curl http://localhost:11434/v1/models
 
-- **Framework**: React 18 with Vite
-- **API**: OpenAI Realtime API (WebSocket-based)
-- **Audio Format**: PCM16 at 24kHz
-- **Voice Detection**: Server-side VAD (Voice Activity Detection)
+# Restart Ollama
+pkill ollama
+ollama serve
+```
 
-## Troubleshooting
+#### GPU Not Detected (EC2)
+```bash
+# Check NVIDIA driver
+nvidia-smi
 
-### Microphone Permission
-If the app cannot access your microphone, check your browser settings to ensure microphone permissions are granted.
+# Check PyTorch CUDA
+python -c "import torch; print(torch.cuda.is_available())"
 
-### Connection Issues
-- Verify your API key is correct and has access to the Realtime API
-- Check your internet connection
-- Ensure you're using a modern browser (Chrome, Edge, or Safari recommended)
+# Set environment
+export USE_CPU=0
+```
 
-### Audio Issues
-- Make sure your browser supports the Web Audio API
-- Check your system audio settings
-- Try using headphones to avoid feedback
+#### CosyVoice Model Not Found
+```bash
+cd backend
+git clone https://www.modelscope.cn/iic/CosyVoice-300M.git pretrained_models/CosyVoice-300M
+```
 
-## License
+#### Port Already in Use
+```bash
+# Kill process on port 8000 (backend)
+sudo lsof -i :8000
+sudo kill -9 <PID>
+
+# Kill process on port 5173 (frontend)
+sudo lsof -i :5173
+sudo kill -9 <PID>
+```
+
+### Performance Issues
+
+#### Slow ASR/TTS
+- Use GPU mode: `USE_CPU=0`
+- Use smaller models: `ASR_MODEL=iic/SenseVoiceNano`
+- Reduce batch size in code
+
+#### High Memory Usage
+- Use quantized models
+- Reduce concurrent connections
+- Monitor with: `nvidia-smi` (GPU) or `htop` (CPU)
+
+---
+
+## 📊 Model Information
+
+### ASR Models
+| Model | Size | Speed | Accuracy | Languages |
+|-------|------|-------|----------|-----------|
+| SenseVoiceNano | 50MB | ⚡⚡⚡ | ⭐⭐⭐ | 中文/英文 |
+| SenseVoiceSmall | 200MB | ⚡⚡ | ⭐⭐⭐⭐ | 多语言 |
+
+### LLM Models (Ollama)
+| Model | Size | Speed | Quality | Use Case |
+|-------|------|-------|---------|----------|
+| qwen3:0.6b | 400MB | ⚡⚡⚡ | ⭐⭐⭐ | Real-time chat |
+| deepseek-r1:1.5b | 1.1GB | ⚡⚡ | ⭐⭐⭐⭐ | Reasoning |
+| qwen2.5:3b | 2GB | ⚡ | ⭐⭐⭐⭐⭐ | High quality |
+
+### TTS Models
+| Model | Size | Quality | Speed |
+|-------|------|---------|-------|
+| CosyVoice-300M | 1GB | ⭐⭐⭐⭐⭐ | ⚡⚡ |
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+## 📝 License
 
 MIT
+
+---
+
+## 🔗 Related Projects
+
+- [Fun-ASR](https://github.com/alibaba-damo-academy/FunASR) - Speech recognition
+- [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) - Speech synthesis
+- [Ollama](https://ollama.com) - Local LLM runtime
+
+---
+
+## 🙏 Acknowledgments
+
+- Alibaba DAMO Academy for Fun-ASR
+- FunAudioLLM team for CosyVoice
+- Ollama team for local LLM infrastructure
+- OpenAI for Realtime API reference
