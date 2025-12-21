@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { restaurantInfo, formatter } from './constants.js';
+import { WebSocketServer } from 'ws';
 
 dotenv.config();
 
@@ -79,6 +80,30 @@ app.get('/token', async (req, res) => {
     res.status(500).json({ error: 'Failed to generate token', details: error.message });
   }
 });
+
+// Create WebSocket server
+const wss = new WebSocketServer({ port: 8080 });
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+
+  ws.on('message', (message) => {
+    console.log('Received audio chunk');
+
+    // Simulate incremental ASR events
+    ws.send(JSON.stringify({ type: 'asr.partial', text: '部分转录文本' }));
+    ws.send(JSON.stringify({ type: 'asr.final', text: '完整转录文本' }));
+
+    // Simulate end of stream
+    ws.send(JSON.stringify({ type: 'done' }));
+  });
+
+  ws.on('close', () => {
+    console.log('WebSocket client disconnected');
+  });
+});
+
+console.log('WebSocket server running on ws://localhost:8080');
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

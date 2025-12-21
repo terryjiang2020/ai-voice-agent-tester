@@ -13,7 +13,21 @@ A full-stack voice conversation system with local AI models (Fun-ASR + Ollama + 
 
 ## 📦 Deployment Options
 
-### 1. EC2 GPU (Recommended for Production)
+### 1. AWS Amplify (Frontend Hosting)
+Global CDN hosting for frontend with backend on EC2/ECS.
+
+📖 **[Amplify Setup Guide](./AMPLIFY_SETUP.md)** - Complete Amplify deployment
+💡 **Best for**: Production with global users, automatic SSL
+
+```bash
+# Deploy frontend to Amplify
+# Backend runs on EC2 or use Remote API
+# See AMPLIFY_SETUP.md for 3 deployment architectures
+```
+
+**Cost**: $5-10/month (frontend) + backend costs
+
+### 2. EC2 GPU (Recommended for Backend)
 Full GPU acceleration on AWS EC2 with local models.
 
 📖 **[EC2 Setup Guide](./EC2_SETUP.md)** - Complete installation instructions
@@ -28,7 +42,7 @@ cd ai-voice-agent-tester
 
 **Requirements**: EC2 GPU instance (g4dn.xlarge+), CUDA 11.8+, 50GB+ storage
 
-### 2. Docker (Development/Testing)
+### 3. Docker (Development/Testing)
 Containerized deployment with CPU or GPU support.
 
 📖 **[Docker Deployment Guide](./DEPLOYMENT.md)**
@@ -40,11 +54,7 @@ docker-compose up --build
 
 **Note**: macOS Docker Desktop does not support GPU access.
 
-### 3. Local Development
-Direct installation on your machine.
-**Note**: macOS Docker Desktop does not support GPU access.
-
-### 3. Local Development
+### 4. Local Development
 Direct installation on your machine.
 
 ```bash
@@ -167,10 +177,15 @@ VITE_BACKEND_WS=ws://localhost:8000/ws   # Backend WebSocket URL
 
 ## 📚 Documentation
 
+### Deployment Guides
+- **[Amplify Setup](./AMPLIFY_SETUP.md)** - AWS Amplify frontend hosting (3 architectures)
 - **[EC2 Setup Guide](./EC2_SETUP.md)** - Production deployment on AWS EC2 GPU
 - **[EC2 Quick Start](./EC2_QUICKSTART.md)** - Fast deployment reference
 - **[Docker Deployment](./DEPLOYMENT.md)** - Container deployment guide
+
+### Configuration
 - **[Ollama Setup](./OLLAMA_SETUP.md)** - Local LLM configuration
+- **[Environment Variables](./.env.example)** - Configuration template
 
 ---
 

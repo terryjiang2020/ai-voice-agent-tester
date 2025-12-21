@@ -11,10 +11,12 @@ import os
 from typing import Dict, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from loguru import logger
+import base64
 
 # 服务模块 (后续实现)
 from services.asr_service import ASRService
@@ -107,6 +109,26 @@ async def health_check():
     }
 
 
+@app.get("/")
+async def root_metadata():
+    """根路由：返回 API 元数据与端点映射（与前端集成文档一致）。"""
+    return {
+        "message": "Voice Assistant Backend API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "websocket": "/ws/voice",
+            "api": {
+                "voice": "/api/voice",
+                "voice_stream": "/api/voice/stream",
+                "asr": "/api/asr",
+                "llm": "/api/llm",
+                "tts": "/api/tts",
+            },
+        },
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket 主连接 - 处理实时语音对话"""
@@ -156,6 +178,229 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if client_id in active_connections:
             del active_connections[client_id]
+
+
+@app.websocket("/ws/voice")
+async def websocket_voice(websocket: WebSocket):
+    """WebSocket 别名，按 Frontend Integration Guide 的消息格式进行交互。
+
+    - 接收二进制音频分片（MediaRecorder data），进行 ASR 并发送 {type: 'asr', content: {text}}。
+    - 进行 LLM 流式生成，发送 {type: 'llm', content: {text, partial}}。
+    - 进行 TTS 流式生成，发送 {type: 'tts', content: {audio}}，其中 audio 为 base64 编码字节。
+    - 支持控制命令：clear、ping。
+    """
+    client_id = f"client_{datetime.now().timestamp()}"
+    await websocket.accept()
+    active_connections[client_id] = websocket
+
+    logger.info(f"✅ [/ws/voice] Client {client_id} connected")
+
+    session = {
+        "asr_buffer": [],
+        "conversation_history": [],
+        "is_speaking": False,
+    }
+
+    try:
+        while True:
+            data = await websocket.receive()
+            if "bytes" in data:
+                # 音频输入 → ASR
+                try:
+                    audio_chunk = audio_processor.process_input_audio(data["bytes"])
+                    asr_result = await asr_service.transcribe_stream(audio_chunk)
+                    if asr_result and asr_result.get("text"):
+                        text = asr_result["text"]
+                        is_final = asr_result.get("is_final", False)
+                        # 发送 ASR 结果
+                        await websocket.send_json({
+                            "type": "asr",
+                            "content": {"text": text},
+                            "timestamp": datetime.now().timestamp(),
+                        })
+                        if is_final:
+                            session["conversation_history"].append({"role": "user", "content": text})
+                            asyncio.create_task(handle_llm_and_tts_voice(websocket, client_id, text, session))
+                except Exception as e:
+                    logger.error(f"[/ws/voice] audio error: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": {"message": str(e)},
+                        "timestamp": datetime.now().timestamp(),
+                    })
+            elif "text" in data:
+                try:
+                    message = json.loads(data["text"]) if data["text"] else {}
+                except Exception:
+                    message = {}
+                # 控制命令
+                cmd = message.get("command")
+                if cmd == "clear":
+                    session["conversation_history"] = []
+                    await websocket.send_json({
+                        "type": "control",
+                        "content": {"message": "Conversation cleared"},
+                        "timestamp": datetime.now().timestamp(),
+                    })
+                elif cmd == "ping":
+                    await websocket.send_json({
+                        "type": "control",
+                        "content": {"message": "pong"},
+                        "timestamp": datetime.now().timestamp(),
+                    })
+                elif message.get("type") == "input_text":
+                    text = message.get("text", "")
+                    if text:
+                        session["conversation_history"].append({"role": "user", "content": text})
+                        await handle_llm_and_tts_voice(websocket, client_id, text, session)
+    except WebSocketDisconnect:
+        logger.info(f"[/ws/voice] Client {client_id} disconnected")
+    except Exception as e:
+        logger.error(f"[/ws/voice] error: {e}")
+    finally:
+        if client_id in active_connections:
+            del active_connections[client_id]
+
+
+async def handle_llm_and_tts_voice(
+    websocket: WebSocket,
+    client_id: str,
+    user_text: str,
+    session: dict,
+):
+    """按前端集成文档的格式发送 LLM/TTS。"""
+    try:
+        response_text = ""
+        async for chunk in llm_service.chat_stream(messages=session["conversation_history"]):
+            response_text += chunk
+            await websocket.send_json({
+                "type": "llm",
+                "content": {"text": chunk, "partial": True},
+                "timestamp": datetime.now().timestamp(),
+            })
+        # 完整 LLM 回复
+        session["conversation_history"].append({"role": "assistant", "content": response_text})
+        await websocket.send_json({
+            "type": "llm",
+            "content": {"text": response_text, "partial": False},
+            "timestamp": datetime.now().timestamp(),
+        })
+
+        # TTS 流式音频（JSON base64）
+        session["is_speaking"] = True
+        async for audio_chunk in tts_service.synthesize_stream(response_text):
+            if not session["is_speaking"]:
+                break
+            b64 = base64.b64encode(audio_chunk).decode("ascii")
+            await websocket.send_json({
+                "type": "tts",
+                "content": {"audio": b64},
+                "timestamp": datetime.now().timestamp(),
+            })
+        session["is_speaking"] = False
+    except Exception as e:
+        logger.error(f"[/ws/voice] llm/tts error: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "content": {"message": str(e)},
+            "timestamp": datetime.now().timestamp(),
+        })
+
+
+@app.post("/api/asr")
+async def api_asr(payload: dict = Body(...)):
+    """ASR REST：接收 base64 音频，返回文本。"""
+    try:
+        b64 = payload.get("audio_data")
+        if not b64:
+            return JSONResponse(status_code=400, content={"success": False, "error": "audio_data required"})
+        audio_bytes = base64.b64decode(b64)
+        audio_chunk = audio_processor.process_input_audio(audio_bytes)
+        result = await asr_service.transcribe_stream(audio_chunk)
+        text = result.get("text", "") if result else ""
+        return {"text": text, "success": True}
+    except Exception as e:
+        logger.error(f"/api/asr error: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
+@app.post("/api/llm")
+async def api_llm(payload: dict = Body(...)):
+    """LLM REST：接收 messages，返回生成文本。"""
+    try:
+        messages = payload.get("messages") or []
+        # 可选参数，不一定被底层使用
+        # temperature = payload.get("temperature")
+        # max_tokens = payload.get("max_tokens")
+        content = ""
+        async for chunk in llm_service.chat_stream(messages=messages):
+            content += chunk
+        return {"content": content, "success": True}
+    except Exception as e:
+        logger.error(f"/api/llm error: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
+@app.post("/api/tts")
+async def api_tts(payload: dict = Body(...)):
+    """TTS REST：接收文本与可选发音人，返回 base64 音频。"""
+    try:
+        text = payload.get("text") or ""
+        if not text:
+            return JSONResponse(status_code=400, content={"success": False, "error": "text required"})
+        # speaker = payload.get("speaker")  # 保留占位，如需使用可在 TTSService 中处理
+        audio_bytes = b""
+        async for audio_chunk in tts_service.synthesize_stream(text):
+            audio_bytes += audio_chunk
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return {"audio_data": b64, "success": True}
+    except Exception as e:
+        logger.error(f"/api/tts error: {e}")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+
+@app.post("/api/voice/stream")
+async def api_voice_stream(request):
+    """Unified streaming endpoint: audio in (raw bytes), NDJSON frames out.
+
+    Frames:
+    {"type": "asr", "text": "..."}
+    {"type": "llm", "text": "...", "partial": true/false}
+    {"type": "tts", "audio": "base64_pcm16"}
+    {"type": "done"}
+    {"type": "error", "message": "..."}
+    """
+    async def frame_stream():
+        try:
+            body = await request.body()
+            if not body:
+                yield json.dumps({"type": "error", "message": "empty audio"}) + "\n"
+                return
+
+            audio_chunk = audio_processor.process_input_audio(body)
+            asr_result = await asr_service.transcribe_stream(audio_chunk)
+            if asr_result and asr_result.get("text"):
+                yield json.dumps({"type": "asr", "text": asr_result["text"]}) + "\n"
+            user_text = asr_result.get("text", "") if asr_result else ""
+
+            # LLM streaming
+            llm_acc = ""
+            async for chunk in llm_service.chat_stream(messages=[{"role": "user", "content": user_text}]):
+                llm_acc += chunk
+                yield json.dumps({"type": "llm", "text": chunk, "partial": True}) + "\n"
+            yield json.dumps({"type": "llm", "text": llm_acc, "partial": False}) + "\n"
+
+            # TTS streaming
+            async for audio_bytes in tts_service.synthesize_stream(llm_acc):
+                b64 = base64.b64encode(audio_bytes).decode("ascii")
+                yield json.dumps({"type": "tts", "audio": b64}) + "\n"
+
+            yield json.dumps({"type": "done"}) + "\n"
+        except Exception as e:
+            logger.error(f"/api/voice/stream error: {e}")
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+    return StreamingResponse(frame_stream(), media_type="application/x-ndjson")
 
 
 async def handle_audio_input(
@@ -301,6 +546,8 @@ if __name__ == "__main__":
     
     logger.info(f"🚀 Starting server on port {port}")
     logger.info(f"   WebSocket endpoint: ws://localhost:{port}/ws")
+    logger.info(f"   WebSocket (voice) : ws://localhost:{port}/ws/voice")
+    logger.info(f"   Root metadata     : http://localhost:{port}/")
     logger.info(f"   Health check: http://localhost:{port}/health")
     
     uvicorn.run(
