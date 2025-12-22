@@ -25,11 +25,11 @@ export async function getLLMResponse(messages, temperature, max_tokens) {
   return res.json();
 }
 
-export async function textToSpeech(text, speaker) {
+export async function textToSpeech(text) {
   const res = await fetch(`${BASE_URL}/api/tts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, speaker }),
+    body: JSON.stringify({ text }),
   });
   return res.json();
 }

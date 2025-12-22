@@ -38,9 +38,9 @@ function App() {
   })
   const processorRef = useRef(null)
 
-  // AudioWorklet refs for TTS playback (CosyVoice at 24000 Hz)
-  const audioWorkletNodeRef = useRef(null)
-  const audioWorkletContextRef = useRef(null)
+  // TTS audio queue management - using AudioWorklet for low-latency streaming
+  const audioWorkletNodeRef = useRef(null)  // AudioWorkletNode for continuous playback
+  const audioWorkletContextRef = useRef(null)  // AudioContext for AudioWorklet (24000 Hz)
 
   // Connect to selected model
   const connect = async () => {
@@ -50,42 +50,21 @@ function App() {
       await connectGrok()
     } else if (selectedModel === 'local') {
       // Initialize AudioWorklet for TTS before connecting
-      // Server sends audio at 16000 Hz sample rate
-      await initializeAudioWorklet(16000)
+      await initializeAudioWorklet()
       await connectLocal()
     }
   }
 
   // Initialize AudioWorklet for low-latency TTS playback
-  // Server sends Float32 PCM audio with sample_rate field (typically 16000 Hz)
-  const initializeAudioWorklet = async (sampleRate = 16000) => {
+  const initializeAudioWorklet = async () => {
     try {
+      // CosyVoice outputs at 24000 Hz (per AUDIO_FORMAT_GUIDE.md)
       const COSYVOICE_SAMPLE_RATE = 24000
       
       const ctx = new AudioContext({ sampleRate: COSYVOICE_SAMPLE_RATE })
       audioWorkletContextRef.current = ctx
 
       console.log('[TTS] Initializing AudioWorklet with sample rate:', COSYVOICE_SAMPLE_RATE)
-      console.log('[TTS] AudioContext initial state:', ctx.state)
-
-      // Monitor AudioContext state changes
-      ctx.onstatechange = () => {
-        console.log('[TTS] AudioContext state changed to:', ctx.state)
-        if (ctx.state === 'suspended') {
-          console.warn('[TTS] AudioContext suspended, attempting to resume...')
-          ctx.resume().then(() => {
-            console.log('[TTS] AudioContext resumed successfully')
-          }).catch(err => {
-            console.error('[TTS] Failed to resume AudioContext:', err)
-          })
-        }
-      }
-
-      // Resume AudioContext if suspended (browser autoplay policy)
-      if (ctx.state === 'suspended') {
-        await ctx.resume()
-        console.log('[TTS] AudioContext resumed, state:', ctx.state)
-      }
 
       // Load AudioWorklet processor module
       await ctx.audioWorklet.addModule('/pcm-player-processor.js')
@@ -99,7 +78,7 @@ function App() {
       workletNode.port.onmessage = (event) => {
         const { type, queueLength, samplesReceived, samplesPlayed } = event.data
         if (type === 'status') {
-          console.log(`[TTS Worklet] Queue: ${queueLength}, Received: ${samplesReceived}, Played: ${samplesPlayed}`)
+          console.log(`[TTS Worklet] Queue: ${queueLength} samples, Received: ${samplesReceived}, Played: ${samplesPlayed}`)
         } else if (type === 'stopped') {
           console.log('[TTS Worklet] Playback stopped')
         }
@@ -107,56 +86,79 @@ function App() {
 
       audioWorkletNodeRef.current = workletNode
       console.log('[TTS] AudioWorklet initialized successfully')
-      
-      // Keep AudioContext alive with periodic checks
-      const keepAliveInterval = setInterval(() => {
-        if (audioWorkletContextRef.current) {
-          if (audioWorkletContextRef.current.state === 'suspended') {
-            console.log('[TTS KeepAlive] Resuming suspended AudioContext')
-            audioWorkletContextRef.current.resume()
-          }
-        } else {
-          clearInterval(keepAliveInterval)
-        }
-      }, 5000) // Check every 5 seconds
-      
     } catch (err) {
       console.error('[TTS] Failed to initialize AudioWorklet:', err)
       throw err
     }
   }
 
-  // Process and stream TTS audio chunk to AudioWorklet
-  // Server sends audio with sample_rate field (typically 16000 or 24000 Hz)
-  const processTTSChunk = async (base64Audio, chunkIndex = 0, sampleRate = 16000) => {
+  // Initialize AudioWorklet for real-time TTS playback
+  // CosyVoice outputs Float32 PCM at 24000 Hz (per AUDIO_FORMAT_GUIDE.md)
+  const initializeAudioWorklet = async () => {
     try {
-      console.log(`[TTS] Processing chunk #${chunkIndex} at ${sampleRate} Hz, AudioWorklet initialized:`, !!audioWorkletNodeRef.current)
+      // CosyVoice outputs at 24000 Hz
+      const COSYVOICE_SAMPLE_RATE = 24000
       
-      if (!audioWorkletNodeRef.current) {
-        console.error('[TTS] AudioWorklet not initialized, cannot play audio')
-        return
-      }
+      const ctx = new AudioContext({ sampleRate: COSYVOICE_SAMPLE_RATE })
+      audioWorkletContextRef.current = ctx
 
-      // Ensure AudioContext is running before processing
-      if (audioWorkletContextRef.current) {
-        const state = audioWorkletContextRef.current.state
-        console.log('[TTS] AudioContext state before processing:', state)
-        
-        if (state !== 'running') {
-          console.log('[TTS] Resuming AudioContext...')
-          try {
-            await audioWorkletContextRef.current.resume()
-            console.log('[TTS] AudioContext resumed successfully, state:', audioWorkletContextRef.current.state)
-          } catch (err) {
-            console.error('[TTS] Failed to resume AudioContext:', err)
-            return
-          }
+      console.log('[TTS] Initializing AudioWorklet with sample rate:', COSYVOICE_SAMPLE_RATE)
+
+      // Load AudioWorklet processor module
+      await ctx.audioWorklet.addModule('/pcm-player-processor.js')
+      console.log('[TTS] AudioWorklet module loaded')
+
+      // Create AudioWorkletNode
+      const workletNode = new AudioWorkletNode(ctx, 'pcm-player-processor')
+      workletNode.connect(ctx.destination)
+
+      // Listen for status messages from worklet
+      workletNode.port.onmessage = (event) => {
+        const { type, queueLength, samplesReceived, samplesPlayed } = event.data
+        if (type === 'status') {
+          console.log(`[TTS Worklet] Queue: ${queueLength} samples, Received: ${samplesReceived}, Played: ${samplesPlayed}`)
+        } else if (type === 'stopped') {
+          console.log('[TTS Worklet] Playback stopped')
         }
-      } else {
-        console.error('[TTS] AudioContext not found')
-        return
       }
 
+      audioWorkletNodeRef.current = workletNode
+      console.log('[TTS] AudioWorklet initialized successfully')
+    } catch (err) {
+      console.error('[TTS] Failed to initialize AudioWorklet:', err)
+      throw err
+    }
+  }
+
+  // Initialize AudioWorklet for real-time TTS playback
+  const initAudioWorklet = async () => {
+    try {
+      console.log('[TTS] Initializing AudioWorklet...')
+
+      // Create AudioContext if needed
+      if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+        const AudioContext = window.AudioContext || window.webkitAudioContext
+        audioContextRef.current = new AudioContext({ sampleRate: 16000 })
+        console.log('[TTS] Created AudioContext with sample rate: 16000')
+      }
+
+      const ctx = audioContextRef.current
+
+      // Load AudioWorklet processor module
+  // Stop TTS playback and clear worklet queue
+  const stopTTSPlayback = () => {
+    console.log('[TTS] Stopping playback and clearing queue')
+
+    // Send stop message to AudioWorklet
+    if (audioWorkletNodeRef.current) {
+      audioWorkletNodeRef.current.port.postMessage({ type: 'stop' })
+    }
+  }
+
+  // Process and stream TTS audio chunk to AudioWorklet
+  // CosyVoice outputs Float32 PCM at 24000 Hz (per AUDIO_FORMAT_GUIDE.md)
+  const processTTSChunk = (base64Audio) => {
+    try {
       // 1) Base64 -> binary bytes
       const binary = atob(base64Audio)
       const bytes = new Uint8Array(binary.length)
@@ -178,56 +180,54 @@ function App() {
         Math.floor(bytes.length / 4)
       )
 
-      console.log(`[TTS] Created Float32Array with ${float32Data.length} samples`)
-
-      // Check sample values and validity (avoid stack overflow with large arrays)
-      let maxSample = -Infinity
-      let minSample = Infinity
-      let hasNonZero = false
-      
-      // Sample first 100 values for quick validation
-      for (let i = 0; i < Math.min(100, float32Data.length); i++) {
-        const sample = float32Data[i]
-        if (sample > maxSample) maxSample = sample
-        if (sample < minSample) minSample = sample
-        if (sample !== 0) hasNonZero = true
-      }
-
-      console.log(`[TTS] Sample range (first 100): [${minSample.toFixed(4)}, ${maxSample.toFixed(4)}]`)
-      console.log('[TTS] First 10 samples:', Array.from(float32Data.slice(0, 10)).map(s => s.toFixed(4)))
-
-      // Validate sample range
-      if (maxSample > 10 || minSample < -10) {
-        console.error('[TTS] Invalid sample range detected! Audio data may be corrupted.')
-        console.error('[TTS] This usually means wrong format (expected Float32 PCM)')
-      }
-
-      // Check if samples are all zeros
-      if (!hasNonZero) {
-        console.warn('[TTS] First 100 samples are all zero - audio may be silent')
-      }
+      console.log(`[TTS] Converted to ${float32Data.length} Float32 samples (range check: ${float32Data[0]?.toFixed(4)})`)
 
       // 3) Send to AudioWorklet for immediate playback
-      try {
+      if (audioWorkletNodeRef.current) {
         audioWorkletNodeRef.current.port.postMessage({
           type: 'pcm',
           samples: float32Data
         })
-        console.log(`[TTS] ✓ Chunk #${chunkIndex}: Sent ${float32Data.length} samples (${(float32Data.length / sampleRate).toFixed(2)}s) to AudioWorklet`)
-      } catch (err) {
-        console.error(`[TTS] ✗ Chunk #${chunkIndex}: Failed to send samples to AudioWorklet:`, err)
-        console.error(`[TTS] ✗ Chunk #${chunkIndex}: Error details:`, err.message, err.stack)
+        console.log(`[TTS] Sent ${float32Data.length} samples to AudioWorklet`)
+      } else {
+        console.error('[TTS] AudioWorklet not initialized')
       }
     } catch (err) {
-      console.error(`[TTS] ✗✗✗ FATAL ERROR processing chunk #${chunkIndex}:`, err)
-      console.error(`[TTS] Error message:`, err.message)
-      console.error(`[TTS] Error stack:`, err.stack)
+      console.error('[TTS] Error processing audio chunk:', err)
     }
   }
 
-  // Stop TTS playback and clear worklet queue
+  const playTTSQueueAll = () => {odule('/pcm-player-processor.js')
+      console.log('[TTS] AudioWorklet module loaded')
+
+      // Create AudioWorkletNode
+      const workletNode = new AudioWorkletNode(ctx, 'pcm-player-processor')
+      workletNode.connect(ctx.destination)
+
+      // Listen for status messages from worklet
+      workletNode.port.onmessage = (event) => {
+        const { type, queueLength, samplesReceived, samplesPlayed } = event.data
+        if (type === 'status') {
+          console.log(`[TTS Worklet] Queue: ${queueLength} samples, Received: ${samplesReceived}, Played: ${samplesPlayed}`)
+        } else if (type === 'stopped') {
+          console.log('[TTS Worklet] Playback stopped')
+        }
+      }
+
+      audioWorkletNodeRef.current = workletNode
+      console.log('[TTS] AudioWorklet initialized successfully')
+    } catch (err) {
+      console.error('[TTS] Failed to initialize AudioWorklet:', err)
+      throw err
+    }
+  }
+
+  // Stop TTS playback and clear queue
   const stopTTSPlayback = () => {
     console.log('[TTS] Stopping playback and clearing queue')
+
+    // Clear main thread queue
+    ttsQueueRef.current = []
 
     // Send stop message to AudioWorklet
     if (audioWorkletNodeRef.current) {
@@ -235,68 +235,156 @@ function App() {
     }
   }
 
-  // Test TTS audio playback with a simple tone
-  const testAudioPlayback = () => {
-    console.log('[TTS Test] Generating test tone...')
-    
-    if (!audioWorkletNodeRef.current) {
-      console.error('[TTS Test] AudioWorklet not initialized')
-      alert('AudioWorklet 未初始化，请先连接到服务')
+  const playTTSQueueAll = () => {
+    console.log('[TTS] Playing all queued audio chunks')
+
+    if (ttsQueueRef.current.length === 0) {
+      console.log('[TTS] Queue empty')
       return
     }
 
-    // Check AudioContext state
-    if (audioWorkletContextRef.current) {
-      console.log('[TTS Test] AudioContext state:', audioWorkletContextRef.current.state)
-      if (audioWorkletContextRef.current.state !== 'running') {
-        audioWorkletContextRef.current.resume().then(() => {
-          console.log('[TTS Test] AudioContext resumed')
-        })
+    // Collect all audio chunks
+    const chunks = []
+    while (ttsQueueRef.current.length > 0) {
+      chunks.push(ttsQueueRef.current.shift())
+    }
+
+    console.log(`[TTS] Processing ${chunks.length} chunks`)
+
+    // Process each chunk with format detection and alignment
+    chunks.forEach((audioChunk, index) => {
+      try {
+        // 1) Base64 → Uint8Array
+        let pcmBytes = Uint8Array.from(atob(audioChunk.audio), c => c.charCodeAt(0))
+        console.log(`[TTS] Chunk ${index + 1}: Decoded ${pcmBytes.length} bytes`)
+
+        // 2) Auto-detect and fix format
+        let float32Samples
+
+        if (pcmBytes.length % 4 === 0) {
+          // Perfect Float32 alignment
+          console.log(`[TTS] Chunk ${index + 1}: Float32 PCM (perfect alignment)`)
+          float32Samples = new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 4)
+        } else if (pcmBytes.length % 2 === 0) {
+          // Int16 format
+          console.log(`[TTS] Chunk ${index + 1}: Int16 PCM`)
+          const int16Samples = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 2)
+          float32Samples = new Float32Array(int16Samples.length)
+          for (let i = 0; i < int16Samples.length; i++) {
+            float32Samples[i] = int16Samples[i] / (int16Samples[i] < 0 ? 32768 : 32767)
+          }
+        } else {
+          // Misaligned - try to fix
+          console.warn(`[TTS] Chunk ${index + 1}: Misaligned data: ${pcmBytes.length} bytes`)
+
+          // Try trimming 1-3 bytes to achieve 4-byte alignment (Float32)
+          let trimmed = 0
+          for (let trim = 1; trim <= 3; trim++) {
+            if ((pcmBytes.length - trim) % 4 === 0) {
+              trimmed = trim
+              break
+            }
+          }
+
+          if (trimmed > 0) {
+            console.log(`[TTS] Chunk ${index + 1}: Trimming last ${trimmed} byte(s) for alignment`)
+            pcmBytes = pcmBytes.slice(0, pcmBytes.length - trimmed)
+            float32Samples = new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 4)
+          } else {
+            throw new Error(`Cannot align ${pcmBytes.length} bytes to any audio format`)
+          }
+        }
+
+        console.log(`[TTS] Chunk ${index + 1}: Sending ${float32Samples.length} samples (first: ${float32Samples[0].toFixed(6)})`)
+
+        // 3) Send to AudioWorklet for real-time playback
+        if (audioWorkletNodeRef.current) {
+          audioWorkletNodeRef.current.port.postMessage({
+            type: 'pcm',
+            samples: float32Samples
+          })
+        }
+      } catch (err) {
+        console.error(`[TTS] Error processing chunk ${index + 1}:`, err)
       }
-    }
-
-    // Generate a 1-second 440Hz sine wave (A4 note) at 24000 Hz
-    const sampleRate = 24000
-    const duration = 1 // seconds
-    const frequency = 440 // Hz
-    const samples = sampleRate * duration
-    const testTone = new Float32Array(samples)
-
-    for (let i = 0; i < samples; i++) {
-      testTone[i] = Math.sin(2 * Math.PI * frequency * i / sampleRate) * 0.3
-    }
-
-    console.log(`[TTS Test] Sending ${samples} test samples to AudioWorklet`)
-    
-    audioWorkletNodeRef.current.port.postMessage({
-      type: 'pcm',
-      samples: testTone
     })
 
-    console.log('[TTS Test] Test tone sent. Listen for a beep...')
+    console.log('[TTS] All chunks sent to AudioWorklet')
   }
 
-  // Force reinitialize AudioWorklet (emergency fix)
-  const reinitializeAudioWorklet = async () => {
-    console.log('[TTS] Force reinitializing AudioWorklet...')
-    
-    // Clean up old worklet
-    if (audioWorkletNodeRef.current) {
-      audioWorkletNodeRef.current.disconnect()
-      audioWorkletNodeRef.current = null
-    }
-    if (audioWorkletContextRef.current) {
-      await audioWorkletContextRef.current.close()
-      audioWorkletContextRef.current = null
+
+  // Play TTS audio queue (FIFO) - Real-time streaming with AudioWorklet
+  const playTTSQueue = () => {
+    if (ttsQueueRef.current.length === 0) {
+      console.log('[TTS] Queue empty')
+      return
     }
 
-    // Reinitialize
-    try {
-      await initializeAudioWorklet(16000)
-      alert('AudioWorklet 重新初始化成功！')
-    } catch (err) {
-      console.error('[TTS] Reinitialization failed:', err)
-      alert('重新初始化失败：' + err.message)
+    // Process all chunks in queue
+    while (ttsQueueRef.current.length > 0) {
+      const audioChunk = ttsQueueRef.current.shift()
+      console.log(`[TTS] Processing chunk, ${ttsQueueRef.current.length} remaining in queue`)
+
+      try {
+        // 1) Base64 → Uint8Array
+        let pcmBytes = Uint8Array.from(atob(audioChunk.audio), c => c.charCodeAt(0))
+        console.log(`[TTS] Decoded ${pcmBytes.length} bytes`)
+
+        // 2) Auto-detect and fix format
+        let float32Samples;
+
+        if (pcmBytes.length % 4 === 0) {
+          // Perfect Float32 alignment
+          console.log('[TTS] Format: Float32 PCM (perfect alignment)')
+          float32Samples = new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 4)
+        } else if (pcmBytes.length % 2 === 0) {
+          // Int16 format
+          console.log('[TTS] Format: Int16 PCM')
+          const int16Samples = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 2)
+          float32Samples = new Float32Array(int16Samples.length)
+          for (let i = 0; i < int16Samples.length; i++) {
+            float32Samples[i] = int16Samples[i] / (int16Samples[i] < 0 ? 32768 : 32767)
+          }
+        } else {
+          // Misaligned - try to fix
+          console.warn(`[TTS] Misaligned data: ${pcmBytes.length} bytes (not divisible by 2 or 4)`)
+
+          // Try trimming 1-3 bytes to achieve 4-byte alignment (Float32)
+          let trimmed = 0
+          for (let trim = 1; trim <= 3; trim++) {
+            if ((pcmBytes.length - trim) % 4 === 0) {
+              trimmed = trim
+              break
+            }
+          }
+
+          if (trimmed > 0) {
+            console.log(`[TTS] Trimming last ${trimmed} byte(s) for alignment`)
+            pcmBytes = pcmBytes.slice(0, pcmBytes.length - trimmed)
+            float32Samples = new Float32Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 4)
+          } else {
+            throw new Error(`Cannot align ${pcmBytes.length} bytes to any audio format`)
+          }
+        }
+
+        // Validate Float32 range
+        const sample = float32Samples[0]
+        if (Math.abs(sample) > 100) {
+          console.warn(`[TTS] Suspicious Float32 value: ${sample} (may be wrong format)`)
+        }
+
+        console.log(`[TTS] Sending ${float32Samples.length} samples to AudioWorklet (first sample: ${float32Samples[0].toFixed(6)})`)
+
+        // 3) Send to AudioWorklet for real-time playback
+        if (audioWorkletNodeRef.current) {
+          audioWorkletNodeRef.current.port.postMessage({
+            type: 'pcm',
+            samples: float32Samples
+          })
+        }
+      } catch (err) {
+        console.error('[TTS] Error processing audio chunk:', err)
+      }
     }
   }
 
@@ -482,12 +570,44 @@ function App() {
       audioContextRef.current = null
     }
 
+    // Clean up AudioWorklet
+    if (audioWorkletNodeRef.current) {
+      audioWorkletNodeRef.current.disconnect()
+      audioWorkletNodeRef.current = null
+    }
+    if (audioWorkletContextRef.current) {
+      audioWorkletContextRef.current.close()
+      audioWorkletContextRef.current = null
+    }
+
     stopPlayback()
 
     // Clear audio queue
     audioQueueRef.current = []
     isPlayingRef.current = false
     nextPlayTimeRef.current = 0
+
+    // Reset VAD state
+    if (vadStateRef.current.silenceTimer) {
+      clearTimeout(vadStateRef.current.silenceTimer)
+    }
+    vadStateRef.current = {
+      isSpeaking: false,
+      speechStartTime: null,
+      speechFrameCount: 0,
+      silenceTimer: null,
+      hasSentSpeechStart: false
+    }
+
+    // Stop TTS playback and clear queue
+    stopTTSPlayback()
+
+    // Clean up AudioWorklet
+    if (audioWorkletNodeRef.current) {
+      console.log('[Cleanup] Disconnecting AudioWorklet')
+      audioWorkletNodeRef.current.disconnect()
+      audioWorkletNodeRef.current = null
+    }
 
     // Close WebRTC if using OpenAI
     if (dataChannelRef.current) {
@@ -638,14 +758,18 @@ function App() {
         }
       };
 
-      // Track TTS chunk sequence for debugging
-      let ttsChunkCounter = 0;
-
-      ws.onopen = () => {
+      ws.onopen = async () => {
         console.log('WebSocket connected');
         setIsConnected(true); // Ensure isConnected is updated
         setConnectionStatus('connected'); // Ensure connectionStatus is updated
         console.log('Updated states: isConnected = true, connectionStatus = connected');
+
+        // Initialize AudioWorklet for TTS playback
+        try {
+          await initAudioWorklet();
+        } catch (err) {
+          console.error('[WebSocket.onopen] Failed to initialize AudioWorklet:', err);
+        }
       }
 
       ws.onmessage = (event) => {
@@ -662,8 +786,6 @@ function App() {
             console.log('[ASR Final] Text:', message.text);
             // Finalize the transcript message
             updateLastTranscript('user', message.text, false);
-            // Add to conversation history
-            updateConversationHistory('user', message.text);
             break;
           case 'response.output_audio_transcript.delta':
             console.log('[AI Delta] Text:', message.text);
@@ -675,6 +797,25 @@ function App() {
             // Finalize AI response
             updateLastTranscript('AI', message.text, false);
             break;
+          case 'error':
+            console.error('[WebSocket Error] Message:', message.message);
+            setError(message.message)
+            break
+          case 'done':
+            console.log('Stream complete')
+            playTTSQueueAll();
+            break
+          case 'tts.chunk':
+            console.log('[TTS Chunk] Received audio chunk, sample_rate:', message.sample_rate);
+            // Add audio chunk to queue
+            ttsQueueRef.current.push({
+              audio: message.audio,
+              sample_rate: message.sample_rate || 16000
+            });
+            console.log(`[TTS] Queue size: ${ttsQueueRef.current.length}`);
+            // Start playing if not already playing
+            // playTTSQueue();
+            break
           case 'llm.partial':
             console.log('[LLM Partial] Text:', message.text);
             if (message.text) {
@@ -742,20 +883,6 @@ function App() {
               });
             }
             break;
-          case 'tts.chunk':
-            ttsChunkCounter++;
-            console.log(`[TTS Chunk] Received audio chunk #${ttsChunkCounter}, sample_rate: ${message.sample_rate}`);
-            // Process and play audio chunk immediately using AudioWorklet
-            // Use sample_rate from server response (16000 or 24000 Hz)
-            processTTSChunk(message.audio, ttsChunkCounter, message.sample_rate || 16000);
-            break;
-          case 'error':
-            console.error('[WebSocket Error] Message:', message.message);
-            setError(message.message)
-            break
-          case 'done':
-            console.log('Stream complete')
-            break
         }
       }
 
@@ -763,7 +890,7 @@ function App() {
         console.log('WebSocket disconnected')
         setConnectionStatus('disconnected')
 
-        // Clean up processor when WebSocket closes
+        // Clean up processor when WebSocket closes to prevent errors
         if (processorRef.current) {
           console.log('[WebSocket.onclose] Cleaning up processor')
           processorRef.current.disconnect()
@@ -811,6 +938,8 @@ function App() {
       const MIN_SPEECH_DURATION = 1000 // Minimum 1 second of speech
       const MIN_SPEECH_FRAMES = 3 // Need 3 consecutive frames to start (avoid noise)
 
+      // Note: ScriptProcessorNode.onaudioprocess is deprecated.
+      // Consider migrating to AudioWorklet for better performance in the future.
       processor.onaudioprocess = (event) => {
         // Skip processing if WebSocket is not open
         if (ws.readyState !== WebSocket.OPEN) {
@@ -845,7 +974,11 @@ function App() {
                 stopTTSPlayback();
 
                 // Notify backend that speech started
-                ws.send(JSON.stringify({ type: 'speech.start' }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'speech.start' }));
+                } else {
+                  console.error('[WebSocket] Cannot send speech.start, WebSocket not open');
+                }
               }
             }
           } else {
@@ -863,7 +996,11 @@ function App() {
             int16Array[i] = Math.min(1, Math.max(-1, audioData[i])) * 32767;
           }
 
-          ws.send(int16Array.buffer);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(int16Array.buffer);
+          } else {
+            console.error('[WebSocket] Cannot send audio frame, WebSocket not open');
+          }
         } else {
           // Silence detected
           if (!vad.isSpeaking) {
@@ -886,6 +1023,8 @@ function App() {
                   // Notify backend that speech ended
                   if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'speech.end' }));
+                  } else {
+                    console.error('[WebSocket] Cannot send speech.end, WebSocket not open');
                   }
                 }, SILENCE_TIMEOUT);
               }
@@ -1276,8 +1415,6 @@ function App() {
                   <div style={{marginTop:'0.5rem',display:'flex',gap:'8px',flexWrap:'wrap'}}>
                     <button onClick={runUnifiedStream}>录 2 秒并调用 /api/voice/stream</button>
                     <button onClick={()=>{appendStreamLog('手动刷新流'); setStreamStatus('idle')}}>清空日志</button>
-                    <button onClick={testAudioPlayback} style={{background:'#4CAF50',color:'white'}}>🔊 测试音频播放</button>
-                    <button onClick={reinitializeAudioWorklet} style={{background:'#FF9800',color:'white'}}>🔧 重新初始化音频</button>
                   </div>
                 )}
                 {micError && (

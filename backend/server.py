@@ -348,7 +348,6 @@ async def api_tts(payload: dict = Body(...)):
         text = payload.get("text") or ""
         if not text:
             return JSONResponse(status_code=400, content={"success": False, "error": "text required"})
-        # speaker = payload.get("speaker")  # 保留占位，如需使用可在 TTSService 中处理
         audio_bytes = b""
         async for audio_chunk in tts_service.synthesize_stream(text):
             audio_bytes += audio_chunk

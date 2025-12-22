@@ -16,7 +16,7 @@ The TTS service communicates with CosyVoice via HTTP:
 1. **CosyVoice** runs as FastAPI service: `uvicorn stream_service:app --port 50000`
 2. **Our backend** internally calls `POST /synthesize` on CosyVoice
 3. **Protocol**: Streaming raw audio bytes
-  - Request: `POST /synthesize` with `{"text": "...", "speaker": "..."}`
+  - Request: `POST /synthesize` with `{"text": "..."}`
   - Response: streaming `application/octet-stream` of audio bytes
 
 Note: `/synthesize` belongs to the CosyVoice service and is NOT exposed by this backend. Frontend should only call the backend REST APIs under `/api/...` and never call `/synthesize` directly.
@@ -172,29 +172,90 @@ Notes:
 
 - Send: binary frames of 16 kHz mono 16-bit PCM (small chunks, e.g., 20–100 ms)
 - Receive: JSON events (text frames)
-- Event types: `speech_started`, `speech_stopped`, `asr.partial`, `asr.final`, `llm.partial`, `llm.final`, `tts.chunk` (base64 PCM16), `done`, `error`, `heartbeat`
+- Event types:
+  - `speech_started`: Indicates the start of speech, triggered by VAD or `speech.start` event.
+  - `speech_stopped`: Indicates the end of speech, triggered by VAD or `speech.end` event.
+  - `asr.partial`: Partial transcription during speech.
+  - `asr.final`: Final transcription when speech ends.
+  - `llm.partial`: Partial AI response during generation.
+  - `llm.final`: Final AI response, includes `interrupted: true` if interrupted.
+  - `tts.chunk`: Base64-encoded audio chunks for playback.
+  - `done`: Signals the end of a turn, including interruptions.
+  - `error`: Reports errors during processing.
+  - `heartbeat`: Periodic keep-alive messages.
+
+#### AI Response Interruption
+
+The WebSocket endpoint supports **automatic interruption** of AI responses when the user starts speaking:
+
+- When the user starts speaking (VAD detection or `speech.start` event), any ongoing AI response (LLM generation + TTS playback) will be **immediately cancelled**.
+- The backend will send:
+  - `llm.final` event with `interrupted: true` flag containing the partial AI response.
+  - `done` event with `interrupted: true` flag to signal the end of the interrupted turn.
+- A new turn will automatically start for the new user input.
+- The frontend should stop playing any queued audio when receiving an interrupted event.
+
+**Event Format for Interruption:**
+```json
+{
+  "type": "llm.final",
+  "ts": 1234567890,
+  "turn_id": "turn-1",
+  "text": "Partial AI response that was interrupted...",
+  "interrupted": true
+}
+```
+
+```json
+{
+  "type": "done",
+  "ts": 1234567890,
+  "turn_id": "turn-1",
+  "interrupted": true
+}
+```
 
 Minimal client outline:
 ```javascript
 const ws = new WebSocket('wss://devserver.elasticdash.com/ws/voice/stream');
 ws.binaryType = 'arraybuffer';
+let audioPlayer = null; // Track current audio player
 
 ws.onmessage = (evt) => {
   const msg = JSON.parse(evt.data);
   switch (msg.type) {
+    case 'speech_started':
+      console.log('User speech started');
+      // Stop any ongoing audio playback immediately
+      if (audioPlayer) {
+        audioPlayer.stop();
+        audioPlayer = null;
+      }
+      break;
     case 'asr.partial':
     case 'asr.final':
       console.log('ASR', msg.text);
       break;
     case 'llm.partial':
+      console.log('LLM partial', msg.text);
+      break;
     case 'llm.final':
-      console.log('LLM', msg.text);
+      if (msg.interrupted) {
+        console.log('LLM interrupted:', msg.text);
+        // Clear any pending audio queue
+      } else {
+        console.log('LLM complete:', msg.text);
+      }
       break;
     case 'tts.chunk':
       // push base64 PCM into AudioWorklet for low-latency playback
       break;
     case 'done':
-      console.log('Turn complete');
+      if (msg.interrupted) {
+        console.log('Turn interrupted by user');
+      } else {
+        console.log('Turn complete');
+      }
       break;
     case 'error':
       console.error(msg.message);
@@ -205,11 +266,19 @@ ws.onmessage = (evt) => {
 // Send PCM chunk (ArrayBuffer) captured from mic at 16kHz mono
 // ws.send(pcmChunkBuffer);
 
-// Optional: tell server to finalize current turn
+// Optional: manually trigger speech start (will interrupt any AI response)
+// ws.send(JSON.stringify({ type: 'speech.start' }));
+
+// Optional: manually trigger speech end
+// ws.send(JSON.stringify({ type: 'speech.end' }));
+
+// Optional: tell server to finalize current turn (legacy)
 // ws.send('stop');
 ```
 
 Playback: reuse the AudioWorklet example in this doc to stream `tts.chunk` frames (base64 PCM16) into the worklet for continuous audio. For a quick test, you can collect `tts.chunk` frames, wrap a WAV header, and play once finished.
+
+**Important:** When implementing the frontend audio player, ensure you can immediately stop playback when receiving a `speech_started` event or `interrupted: true` flag. This provides a natural conversation flow where the AI stops talking when the user starts speaking.
 
 ### Continuous Playback (low-latency) with AudioWorklet
 
@@ -460,7 +529,6 @@ Convert text to speech audio.
 ```json
 {
   "text": "要转换为语音的文字",
-  "speaker": "中文女"  // optional
 }
 ```
 
@@ -474,15 +542,14 @@ Convert text to speech audio.
 
 **Frontend Usage:**
 ```javascript
-async function textToSpeech(text, speaker = '中文女') {
+async function textToSpeech(text) {
   const response = await fetch('https://devserver.elasticdash.com/api/tts', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      text: text,
-      speaker: speaker
+      text: text
     })
   });
   
@@ -514,6 +581,19 @@ function base64ToBlob(base64, mimeType) {
 
 ---
 
+## ASR Debouncing
+
+### Overview
+To improve performance and reduce redundant processing, the ASR service now includes a debouncing mechanism. This ensures that ASR triggers are limited to a specified time interval, preventing high-frequency triggers from overwhelming the system.
+
+### Key Details
+- **Debounce Interval**: 0.5 seconds (default).
+- **Behavior**: If an ASR request is received within the debounce interval, it will be ignored.
+- **Impact**: Reduces redundant ASR processing while maintaining responsiveness.
+
+### Frontend Considerations
+- Ensure audio chunks are sent at a reasonable frequency (e.g., 100ms intervals) to avoid unnecessary debouncing.
+- The backend will handle debouncing automatically; no additional frontend changes are required.
 
 ---
 
